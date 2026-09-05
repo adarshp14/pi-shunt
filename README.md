@@ -37,7 +37,9 @@ Nothing is blocked until a worker is set.
 
 **`bulk_read`** sends the files plus a question to the worker and returns a structured bullet answer.
 
-**`code_write`** sends a spec plus reference files to the worker and writes the result to disk. Pass both the pattern file (an existing test, say) and the source it must be correct against, or the worker will invent names.
+**`code_write`** sends a spec plus reference files to the worker and writes the result to disk.
+
+Both tools show the worker, elapsed time and tokens sent while running, then the answer (first 10 lines, `Ctrl+O` for all). `code_write` shows the generated code the same way even when it wrote to a file; the main model still never sees it. Pass both the pattern file (an existing test, say) and the source it must be correct against, or the worker will invent names.
 
 ## Commands
 

@@ -17,6 +17,7 @@
 import { complete } from "@mariozechner/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { isToolCallEventType } from "@mariozechner/pi-coding-agent";
+import { Text } from "@mariozechner/pi-tui";
 import { Type } from "typebox";
 import { existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -76,7 +77,13 @@ export default function shunt(pi: ExtensionAPI) {
 	const workerLabel = () => (cfg.provider && cfg.model ? `${cfg.provider}/${cfg.model}` : "not set");
 
 	// Resolve worker model + auth from Pi's own registry, so Copilot/OpenAI/etc. OAuth just works.
-	async function invoke(mode: keyof typeof PROMPTS, message: string, ctx: ExtensionContext, signal?: AbortSignal) {
+	async function invoke(
+		mode: keyof typeof PROMPTS,
+		message: string,
+		ctx: ExtensionContext,
+		signal?: AbortSignal,
+		onUpdate?: (r: { content: { type: "text"; text: string }[]; details: any }) => void,
+	) {
 		if (!cfg.provider || !cfg.model) throw new Error("No worker model. Run /shunt <provider>/<model-id>.");
 		const model = ctx.modelRegistry.find(cfg.provider, cfg.model);
 		if (!model) throw new Error(`Worker ${workerLabel()} not in registry. Run /shunt to pick another.`);
@@ -84,6 +91,9 @@ export default function shunt(pi: ExtensionAPI) {
 		// OAuth token refresh, and the loser's request fails once. Fresh auth on retry picks
 		// up the refreshed token from disk.
 		const t0 = Date.now();
+		// Heartbeat so the TUI shows the worker is busy (calls can take minutes).
+		const tick = setInterval(() => onUpdate?.({ content: [{ type: "text", text: `${workerLabel()} working… ${Math.round((Date.now() - t0) / 1000)}s · ${Math.round(message.length / 4)} tok sent` }], details: undefined }), 1000);
+		try {
 		let res!: Awaited<ReturnType<typeof complete>>;
 		for (let attempt = 1; ; attempt++) {
 			const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
@@ -107,7 +117,27 @@ export default function shunt(pi: ExtensionAPI) {
 			.trim();
 		if (!text) throw new Error(`${workerLabel()} returned no text (stop: ${res.stopReason}${res.errorMessage ? `: ${res.errorMessage}` : ""}).`);
 		return { text, inputTokens: res.usage ? (res.usage.input ?? 0) + (res.usage.cacheRead ?? 0) : Math.round(message.length / 4), ms: Date.now() - t0 };
+		} finally {
+			clearInterval(tick);
+		}
 	}
+
+	// ---- rendering ------------------------------------------------------
+	type Details = { worker: string; inputTokens: number; ms: number; paths?: string[]; target?: string; lines?: number; code?: string };
+	const header = (theme: any, name: string, tail: string) => theme.fg("toolTitle", theme.bold(`${name} `)) + theme.fg("muted", `→ ${workerLabel()} `) + theme.fg("dim", tail);
+	const renderResult = (result: { content: { type: string; text?: string }[]; details?: Details }, { expanded, isPartial }: { expanded: boolean; isPartial: boolean }, theme: any, context: { isError?: boolean }) => {
+		const body = result.content.map((c) => c.text ?? "").join("\n").trim();
+		if (isPartial) return new Text(theme.fg("warning", body || "…"), 0, 0);
+		if (context.isError) return new Text(theme.fg("error", body), 0, 0);
+		const d = result.details;
+		let out = d ? theme.fg("success", "✓ ") + theme.fg("muted", `${d.worker} · ${(d.inputTokens / 1000).toFixed(1)}k tok in · ${(d.ms / 1000).toFixed(0)}s`) : "";
+		const full = d?.code ?? body;
+		const lines = full.split("\n");
+		const shown = expanded ? lines : lines.slice(0, 10);
+		out += "\n" + theme.fg("toolOutput", shown.join("\n"));
+		if (!expanded && lines.length > shown.length) out += theme.fg("dim", `\n… ${lines.length - shown.length} more lines (ctrl+o)`);
+		return new Text(out, 0, 0);
+	};
 
 	// ---- gate -----------------------------------------------------------
 	pi.on("tool_call", async (event, ctx) => {
@@ -147,15 +177,17 @@ export default function shunt(pi: ExtensionAPI) {
 			question: Type.String({ description: "What you want to know about the files" }),
 			paths: Type.Array(Type.String(), { description: "Files to read (relative to cwd)", minItems: 1 }),
 		}),
-		async execute(_id, { question, paths }, signal, _onUpdate, ctx) {
+		async execute(_id, { question, paths }, signal, onUpdate, ctx) {
 			const { text: files, missing } = wrapFiles(paths, ctx.cwd);
 			if (missing.length) throw new Error(`File not found: ${missing.join(", ")}`);
-			const r = await invoke("bulk-reader", `${files}Question: ${question}\n`, ctx, signal);
+			const r = await invoke("bulk-reader", `${files}Question: ${question}\n`, ctx, signal, onUpdate);
 			return {
 				content: [{ type: "text", text: r.text }],
 				details: { worker: workerLabel(), inputTokens: r.inputTokens, ms: r.ms, paths },
 			};
 		},
+		renderCall: (args, theme) => new Text(header(theme, "bulk_read", `${(args.paths ?? []).join(", ")} · "${args.question ?? ""}"`), 0, 0),
+		renderResult,
 	});
 
 	pi.registerTool({
@@ -172,21 +204,23 @@ export default function shunt(pi: ExtensionAPI) {
 			references: Type.Array(Type.String(), { description: "Files whose patterns/identifiers the output must match", minItems: 1 }),
 			target: Type.Optional(Type.String({ description: "Write output here (relative to cwd) instead of returning it" })),
 		}),
-		async execute(_id, { spec, references, target }, signal, _onUpdate, ctx) {
+		async execute(_id, { spec, references, target }, signal, onUpdate, ctx) {
 			const { text: files, missing } = wrapFiles(references, ctx.cwd);
 			if (missing.length) throw new Error(`Reference not found: ${missing.join(", ")}`);
-			const r = await invoke("code-writer", `Spec: ${spec}\n\n${files}`, ctx, signal);
+			const r = await invoke("code-writer", `Spec: ${spec}\n\n${files}`, ctx, signal, onUpdate);
 			const code = r.text.replace(/^```[a-z]*\n?/gm, "").replace(/^```\s*$/gm, "");
 			if (target) {
 				writeFileSync(resolve(ctx.cwd, target), code.endsWith("\n") ? code : code + "\n");
 				const n = code.split("\n").length;
 				return {
 					content: [{ type: "text", text: `Wrote ${n} lines to ${target} via ${workerLabel()}. Not shown; typecheck/run it, then read specific parts if needed.` }],
-					details: { worker: workerLabel(), inputTokens: r.inputTokens, ms: r.ms, target, lines: n },
+					details: { worker: workerLabel(), inputTokens: r.inputTokens, ms: r.ms, target, lines: n, code },
 				};
 			}
 			return { content: [{ type: "text", text: code }], details: { worker: workerLabel(), inputTokens: r.inputTokens, ms: r.ms } };
 		},
+		renderCall: (args, theme) => new Text(header(theme, "code_write", `${args.target ?? "(inline)"} ← ${(args.references ?? []).join(", ")}`), 0, 0),
+		renderResult,
 	});
 
 	// ---- command --------------------------------------------------------
