@@ -4,14 +4,35 @@
   "description": "Route large file reads and boilerplate generation to a cheap worker model (any model Pi is logged in to) so your main model's context stays small.",
   "license": "MIT",
   "author": "Adarsh Pandey",
-  "repository": { "type": "git", "url": "https://github.com/gothamdev244/pi-shunt" },
-  "keywords": ["pi-package", "pi", "pi-coding-agent", "tokens", "delegation", "shunt", "context"],
-  "files": ["extensions", "scripts", "README.md"],
-  "pi": { "extensions": ["./extensions"] },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/gothamdev244/pi-shunt.git"
+  },
+  "keywords": [
+    "pi-package",
+    "pi",
+    "pi-coding-agent",
+    "tokens",
+    "delegation",
+    "shunt",
+    "context"
+  ],
+  "files": [
+    "extensions",
+    "scripts",
+    "README.md"
+  ],
+  "pi": {
+    "extensions": [
+      "./extensions"
+    ]
+  },
   "peerDependencies": {
     "@mariozechner/pi-ai": "*",
     "@mariozechner/pi-coding-agent": "*",
     "typebox": "*"
   },
-  "scripts": { "test": "bash scripts/smoke.sh" }
+  "scripts": {
+    "test": "bash scripts/smoke.sh"
+  }
 }
