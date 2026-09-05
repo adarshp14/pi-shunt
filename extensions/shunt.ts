@@ -80,19 +80,26 @@ export default function shunt(pi: ExtensionAPI) {
 		if (!cfg.provider || !cfg.model) throw new Error("No worker model. Run /shunt <provider>/<model-id>.");
 		const model = ctx.modelRegistry.find(cfg.provider, cfg.model);
 		if (!model) throw new Error(`Worker ${workerLabel()} not in registry. Run /shunt to pick another.`);
-		const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
-		if (!auth.ok) throw new Error(`Auth for ${workerLabel()}: ${auth.error}`);
-		if (!auth.apiKey) throw new Error(`No API key/OAuth for ${workerLabel()}.`);
-
+		// Two attempts: concurrent Pi processes (subagents, a second session) can race on an
+		// OAuth token refresh, and the loser's request fails once. Fresh auth on retry picks
+		// up the refreshed token from disk.
 		const t0 = Date.now();
-		const res = await complete(
-			model,
-			{
-				systemPrompt: PROMPTS[mode],
-				messages: [{ role: "user", content: [{ type: "text", text: message }], timestamp: Date.now() }],
-			},
-			{ apiKey: auth.apiKey, headers: auth.headers, signal, ...(model.reasoning ? {} : { temperature: 0.2 }) },
-		);
+		let res!: Awaited<ReturnType<typeof complete>>;
+		for (let attempt = 1; ; attempt++) {
+			const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
+			if (!auth.ok) throw new Error(`Auth for ${workerLabel()}: ${auth.error}`);
+			if (!auth.apiKey) throw new Error(`No API key/OAuth for ${workerLabel()}.`);
+			res = await complete(
+				model,
+				{
+					systemPrompt: PROMPTS[mode],
+					messages: [{ role: "user", content: [{ type: "text", text: message }], timestamp: Date.now() }],
+				},
+				{ apiKey: auth.apiKey, headers: auth.headers, signal, ...(model.reasoning ? {} : { temperature: 0.2 }) },
+			);
+			if (res.stopReason !== "error" || attempt >= 2 || signal?.aborted) break;
+			await new Promise((r) => setTimeout(r, 1500));
+		}
 		const text = res.content
 			.filter((c): c is { type: "text"; text: string } => c.type === "text")
 			.map((c) => c.text)

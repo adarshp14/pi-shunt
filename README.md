@@ -63,6 +63,7 @@ Checked against grep on real repos:
 
 - A model can still read a whole file in offset/limit chunks. The gate discourages it, it does not prevent it.
 - If the worker errors, the main model falls back to chunked reads, which costs more than no gate at all. Errors are surfaced verbatim so you notice.
+- Several Pi processes on one OAuth login (subagents, a second session) can race on the token refresh, and the loser's request fails. The worker call retries once with fresh auth, which covers the common case. Pi itself has no cross-process refresh lock as of 0.85.
 - Each delegation is one shot. There is no server-side session; follow-ups resend the files, which is free where it matters because they go to the worker.
 
 ## Test
